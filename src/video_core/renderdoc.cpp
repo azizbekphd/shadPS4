@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "common/assert.h"
 #include "common/logging/formatter.h"
 #include "core/emulator_settings.h"
 #include "video_core/renderdoc.h"
@@ -24,7 +23,7 @@ enum class CaptureState {
     Triggered,
     InProgress,
 };
-static CaptureState capture_state{CaptureState::Idle};
+static std::atomic<CaptureState> capture_state{CaptureState::Idle};
 static std::atomic<u32> screenshot_game_only_count{0};
 static std::atomic<u32> screenshot_with_overlays_count{0};
 
@@ -56,13 +55,6 @@ void LoadRenderDoc() {
         const auto path_to_lib = path.generic_string();
         mod = LoadLibraryA(path_to_lib.c_str());
     }
-
-    if (mod) {
-        const auto RENDERDOC_GetAPI =
-            reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(mod, "RENDERDOC_GetAPI"));
-        const s32 ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&rdoc_api);
-        ASSERT(ret == 1);
-    }
 #else
 #ifdef ANDROID
     static constexpr const char RENDERDOC_LIB[] = "libVkLayer_GLES_RenderDoc.so";
@@ -73,24 +65,39 @@ void LoadRenderDoc() {
     void* mod = dlopen(RENDERDOC_LIB, RTLD_NOW | RTLD_NOLOAD);
     if (!mod && EmulatorSettings.IsRenderdocEnabled()) {
         // If enabled in config, try to load RDoc runtime in offline mode
-        if ((mod = dlopen(RENDERDOC_LIB, RTLD_NOW))) {
-            const auto RENDERDOC_GetAPI =
-                reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(mod, "RENDERDOC_GetAPI"));
-            const s32 ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&rdoc_api);
-            ASSERT(ret == 1);
-        } else {
+        mod = dlopen(RENDERDOC_LIB, RTLD_NOW);
+        if (!mod) {
             LOG_ERROR(Render, "Cannot load RenderDoc: {}", dlerror());
         }
     }
 #endif
-    if (rdoc_api) {
-        // Disable default capture keys as they suppose to trigger present-to-present capturing
-        // and it is not what we want
-        rdoc_api->SetCaptureKeys(nullptr, 0);
-
-        // Also remove rdoc crash handler
-        rdoc_api->UnloadCrashHandler();
+    if (!mod) {
+        return;
     }
+#ifdef WIN32
+    const auto get_api =
+        reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(mod, "RENDERDOC_GetAPI"));
+#else
+    const auto get_api = reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(mod, "RENDERDOC_GetAPI"));
+#endif
+    if (!get_api) {
+        LOG_ERROR(Render, "Cannot find RenderDoc API entry point");
+        return;
+    }
+
+    void* api{};
+    if (get_api(eRENDERDOC_API_Version_1_6_0, &api) != 1 || !api) {
+        LOG_ERROR(Render, "RenderDoc API 1.6.0 is unavailable");
+        return;
+    }
+    rdoc_api = static_cast<RENDERDOC_API_1_6_0*>(api);
+
+    // Disable default capture keys as they suppose to trigger present-to-present capturing
+    // and it is not what we want
+    rdoc_api->SetCaptureKeys(nullptr, 0);
+
+    // Also remove rdoc crash handler
+    rdoc_api->UnloadCrashHandler();
 }
 
 void StartCapture() {
