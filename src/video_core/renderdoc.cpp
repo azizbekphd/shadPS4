@@ -24,7 +24,7 @@ enum class CaptureState {
     Triggered,
     InProgress,
 };
-static CaptureState capture_state{CaptureState::Idle};
+static std::atomic<CaptureState> capture_state{CaptureState::Idle};
 static std::atomic<u32> screenshot_game_only_count{0};
 static std::atomic<u32> screenshot_with_overlays_count{0};
 
@@ -73,14 +73,16 @@ void LoadRenderDoc() {
     void* mod = dlopen(RENDERDOC_LIB, RTLD_NOW | RTLD_NOLOAD);
     if (!mod && EmulatorSettings.IsRenderdocEnabled()) {
         // If enabled in config, try to load RDoc runtime in offline mode
-        if ((mod = dlopen(RENDERDOC_LIB, RTLD_NOW))) {
-            const auto RENDERDOC_GetAPI =
-                reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(mod, "RENDERDOC_GetAPI"));
-            const s32 ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&rdoc_api);
-            ASSERT(ret == 1);
-        } else {
+        mod = dlopen(RENDERDOC_LIB, RTLD_NOW);
+        if (!mod) {
             LOG_ERROR(Render, "Cannot load RenderDoc: {}", dlerror());
         }
+    }
+    if (mod) {
+        const auto RENDERDOC_GetAPI =
+            reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(mod, "RENDERDOC_GetAPI"));
+        const s32 ret = RENDERDOC_GetAPI(eRENDERDOC_API_Version_1_6_0, (void**)&rdoc_api);
+        ASSERT(ret == 1);
     }
 #endif
     if (rdoc_api) {
