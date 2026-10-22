@@ -69,6 +69,7 @@ public:
     ~Liverpool();
 
     void SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb);
+    void EndGfxSubmit();
     void SubmitAsc(u32 gnm_vqid, std::span<const u32> acb);
 
     void SubmitDone() noexcept {
@@ -186,12 +187,14 @@ private:
 
     using CmdBuffer = std::pair<std::span<const u32>, std::span<const u32>>;
     CmdBuffer CopyCmdBuffers(std::span<const u32> dcb, std::span<const u32> ccb);
-    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb);
+    Task ProcessGraphics(std::span<const u32> dcb);
     Task ProcessCeUpdate(std::span<const u32> ccb);
+    Task ProcessSubmitEnd(bool is_ce);
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
 
     void ProcessCommands();
+    void ProcessCeQueue();
     void Process(std::stop_token stoken);
 
     struct GpuQueue {
@@ -204,27 +207,19 @@ private:
         ComputeProgram cs_state{};
     };
     std::array<GpuQueue, NumTotalQueues> mapped_queues{};
-    u32 num_mapped_queues{1u}; // GFX is always available
+    std::queue<Task::Handle> ce_submits;
+    u64 ce_submit_count{};
+    u64 gfx_submit_count{};
+    std::atomic<u32> num_mapped_queues{1u}; // GFX is always available
 
     VAddr indirect_args_addr{};
     u32 num_counter_pairs{};
     u64 pixel_counter{};
 
     struct ConstantEngine {
-        void Reset() {
-            ce_count = 0;
-            de_count = 0;
-            ce_compare_count = 0;
-        }
-
-        [[nodiscard]] u32 Diff() const {
-            ASSERT_MSG(ce_count >= de_count, "DE counter is ahead of CE");
-            return ce_count - de_count;
-        }
-
-        u32 ce_compare_count{};
         u32 ce_count{};
-        u32 de_count{};
+        u64 ce_compare_count{};
+        u64 de_count{};
         static std::array<u8, 48_KB> constants_heap;
     } cblock{};
 
