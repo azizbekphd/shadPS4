@@ -1470,6 +1470,7 @@ s32 PS4_SYSV_ABI sceGnmRequestFlipAndSubmitDoneForWorkload(u64 workload, u32* gp
         });
     }
     liverpool->SubmitGfx(dcb_span, {});
+    liverpool->EndGfxSubmit();
 
     if (!liverpool->IsGpuIdle()) {
         submission_lock = true;
@@ -2360,6 +2361,7 @@ static inline s32 PerformSubmit(u32 count, const u32* dcb_gpu_addrs[], u32* dcb_
         }
         liverpool->SubmitGfx(dcb_span, ccb_span);
     }
+    liverpool->EndGfxSubmit();
     return ORBIS_OK;
 }
 

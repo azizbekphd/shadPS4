@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -97,6 +99,7 @@ void Liverpool::ProcessCeQueue() {
         task = ce_submits.front();
     }
     task.resume();
+    ce_waiting_for_gfx = !task.done();
     if (task.done()) {
         task.destroy();
         std::scoped_lock lock{queue.m_access};
@@ -105,6 +108,13 @@ void Liverpool::ProcessCeQueue() {
         std::scoped_lock lock2{submit_mutex};
         submit_cv.notify_all();
     }
+}
+
+bool Liverpool::CanWaitForVoLabel() {
+    auto& queue = mapped_queues[GfxQueueId];
+    std::scoped_lock lock{queue.m_access};
+    return num_commands == 0 && num_submits == queue.submits.size() + ce_submits.size() &&
+           (ce_submits.empty() || ce_waiting_for_gfx);
 }
 
 void Liverpool::ProcessCommands() {
@@ -119,6 +129,21 @@ void Liverpool::ProcessCommands() {
         }
         callback();
     }
+}
+
+Liverpool::Task Liverpool::ProcessSubmitEnd(bool is_ce) {
+    const auto* task_name = is_ce ? ccb_task_name : dcb_task_name;
+    FIBER_ENTER(task_name);
+    auto& current = is_ce ? ce_submit_count : gfx_submit_count;
+    const auto& other = is_ce ? gfx_submit_count : ce_submit_count;
+    const u64 submit = ++current;
+    if (!is_ce) {
+        ce_waiting_for_gfx = false;
+    }
+    while (other < submit) {
+        YIELD(task_name);
+    }
+    FIBER_EXIT;
 }
 
 void Liverpool::Process(std::stop_token stoken) {
@@ -219,12 +244,13 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
         case PM4ItOpcode::IncrementCeCounter: {
             ++cblock.ce_count;
+            ++cblock.ce_compare_count;
             break;
         }
         case PM4ItOpcode::WaitOnDeCounterDiff: {
             const auto diff = it_body[0];
-            while (cblock.ce_count >= cblock.de_count &&
-                   (cblock.ce_count - cblock.de_count) >= diff) {
+            while (cblock.ce_compare_count >= cblock.de_count &&
+                   (cblock.ce_compare_count - cblock.de_count) >= diff) {
                 YIELD_CE();
             }
             break;
@@ -825,17 +851,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             case PM4ItOpcode::WaitRegMem: {
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-                // Optimization: VO label waits are special because the emulator
-                // will write to the label when presentation is finished. So if
-                // there are no other submits to yield to we can sleep the thread
-                // instead and allow other tasks to run.
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
-                if (vo_port->IsVoLabel(wait_addr) &&
-                    num_submits == mapped_queues[GfxQueueId].submits.size()) {
-                    vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
-                    break;
-                }
                 while (!wait_reg_mem->Test(regs.reg_array)) {
+                    if (vo_port && vo_port->IsVoLabel(wait_addr) && CanWaitForVoLabel()) {
+                        vo_port->WaitVoLabelFor(std::chrono::milliseconds{1},
+                                                [&] { return wait_reg_mem->Test(regs.reg_array); });
+                    }
                     YIELD_GFX();
                 }
                 break;
@@ -857,12 +878,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             }
             case PM4ItOpcode::IncrementDeCounter: {
                 ++cblock.de_count;
+                ce_waiting_for_gfx = false;
                 break;
             }
             case PM4ItOpcode::WaitOnCeCounter: {
-                while (cblock.ce_count <= cblock.de_count) {
+                while (cblock.ce_count == 0) {
                     YIELD_GFX();
                 }
+                --cblock.ce_count;
                 break;
             }
             case PM4ItOpcode::PfpSyncMe: {
@@ -1232,6 +1255,15 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     }
 }
 
+void Liverpool::EndGfxSubmit() {
+    auto& queue = mapped_queues[GfxQueueId];
+    std::scoped_lock lock{submit_mutex, queue.m_access};
+    ce_submits.emplace(ProcessSubmitEnd(true).handle);
+    queue.submits.emplace(ProcessSubmitEnd(false).handle);
+    num_submits += 2;
+    submit_cv.notify_one();
+}
+
 void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     ASSERT_MSG(gnm_vqid > 0 && gnm_vqid < NumTotalQueues, "Invalid virtual ASC queue index");
     auto& queue = mapped_queues[gnm_vqid];
@@ -1239,14 +1271,12 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     const auto vqid = gnm_vqid - 1;
     const auto& task = ProcessCompute(acb, vqid);
     {
-        std::scoped_lock lock{queue.m_access};
+        std::scoped_lock lock{submit_mutex, queue.m_access};
         queue.submits.emplace(task.handle);
+        num_mapped_queues = std::max(num_mapped_queues.load(), gnm_vqid + 1);
+        ++num_submits;
+        submit_cv.notify_one();
     }
-
-    std::scoped_lock lk{submit_mutex};
-    num_mapped_queues = std::max(num_mapped_queues, gnm_vqid + 1);
-    ++num_submits;
-    submit_cv.notify_one();
 }
 
 } // namespace AmdGpu
