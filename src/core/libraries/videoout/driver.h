@@ -7,6 +7,7 @@
 #include "common/polyfill_thread.h"
 #include "core/libraries/videoout/video_out.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -28,6 +29,7 @@ struct VideoOutPort {
     std::vector<Kernel::OrbisKernelEqueue> flip_events;
     std::vector<Kernel::OrbisKernelEqueue> vblank_events;
     std::mutex vo_mutex;
+    std::mutex label_mutex;
     std::mutex port_mutex;
     std::condition_variable vo_cv;
     std::condition_variable vblank_cv;
@@ -50,13 +52,13 @@ struct VideoOutPort {
         return address >= start && address <= end;
     }
 
-    void WaitVoLabel(auto&& pred) {
-        std::unique_lock lk{vo_mutex};
-        vo_cv.wait(lk, pred);
+    void WaitVoLabelFor(std::chrono::milliseconds timeout, auto&& pred) {
+        std::unique_lock lk{label_mutex};
+        vo_cv.wait_for(lk, timeout, pred);
     }
 
     void SignalVoLabel() {
-        std::scoped_lock lk{vo_mutex};
+        std::scoped_lock lk{label_mutex};
         vo_cv.notify_one();
     }
 

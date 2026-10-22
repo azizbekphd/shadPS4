@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -97,6 +99,7 @@ void Liverpool::ProcessCeQueue() {
         task = ce_submits.front();
     }
     task.resume();
+    ce_waiting_for_gfx = !task.done();
     if (task.done()) {
         task.destroy();
         std::scoped_lock lock{queue.m_access};
@@ -105,6 +108,13 @@ void Liverpool::ProcessCeQueue() {
         std::scoped_lock lock2{submit_mutex};
         submit_cv.notify_all();
     }
+}
+
+bool Liverpool::CanWaitForVoLabel() {
+    auto& queue = mapped_queues[GfxQueueId];
+    std::scoped_lock lock{queue.m_access};
+    return num_commands == 0 && num_submits == queue.submits.size() + ce_submits.size() &&
+           (ce_submits.empty() || ce_waiting_for_gfx);
 }
 
 void Liverpool::ProcessCommands() {
@@ -127,6 +137,9 @@ Liverpool::Task Liverpool::ProcessSubmitEnd(bool is_ce) {
     auto& current = is_ce ? ce_submit_count : gfx_submit_count;
     const auto& other = is_ce ? gfx_submit_count : ce_submit_count;
     const u64 submit = ++current;
+    if (!is_ce) {
+        ce_waiting_for_gfx = false;
+    }
     while (other < submit) {
         YIELD(task_name);
     }
@@ -838,17 +851,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             case PM4ItOpcode::WaitRegMem: {
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-                // Optimization: VO label waits are special because the emulator
-                // will write to the label when presentation is finished. So if
-                // there are no other submits to yield to we can sleep the thread
-                // instead and allow other tasks to run.
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
-                if (vo_port->IsVoLabel(wait_addr) &&
-                    num_submits == mapped_queues[GfxQueueId].submits.size()) {
-                    vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
-                    break;
-                }
                 while (!wait_reg_mem->Test(regs.reg_array)) {
+                    if (vo_port && vo_port->IsVoLabel(wait_addr) && CanWaitForVoLabel()) {
+                        vo_port->WaitVoLabelFor(std::chrono::milliseconds{1},
+                                                [&] { return wait_reg_mem->Test(regs.reg_array); });
+                    }
                     YIELD_GFX();
                 }
                 break;
@@ -870,6 +878,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb) {
             }
             case PM4ItOpcode::IncrementDeCounter: {
                 ++cblock.de_count;
+                ce_waiting_for_gfx = false;
                 break;
             }
             case PM4ItOpcode::WaitOnCeCounter: {

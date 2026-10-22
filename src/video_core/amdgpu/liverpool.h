@@ -195,6 +195,7 @@ private:
 
     void ProcessCommands();
     void ProcessCeQueue();
+    bool CanWaitForVoLabel();
     void Process(std::stop_token stoken);
 
     struct GpuQueue {
@@ -210,6 +211,7 @@ private:
     std::queue<Task::Handle> ce_submits;
     u64 ce_submit_count{};
     u64 gfx_submit_count{};
+    bool ce_waiting_for_gfx{};
     std::atomic<u32> num_mapped_queues{1u}; // GFX is always available
 
     VAddr indirect_args_addr{};
