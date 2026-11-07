@@ -311,6 +311,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_buffer_fp32_atomic_min_max =
             instance_.IsShaderAtomicFloatBuffer32MinMaxSupported(),
         .supports_image_fp32_atomic_min_max = instance_.IsShaderAtomicFloatImage32MinMaxSupported(),
+        .supports_shared_fp32_atomic_min_max =
+            instance_.IsShaderAtomicFloatShared32MinMaxSupported(),
         .supports_buffer_int64_atomics = instance_.IsBufferInt64AtomicsSupported(),
         .supports_shared_int64_atomics = instance_.IsSharedInt64AtomicsSupported(),
         .supports_workgroup_explicit_memory_layout =
@@ -328,6 +330,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
         .fast_shader_math = EmulatorSettings.IsFastShaderMath(),
+        .support_bda = instance_.IsBufferDeviceAddressSupported(),
     };
     WarmUp();
 
